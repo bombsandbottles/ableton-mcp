@@ -499,6 +499,131 @@ def stop_playback(ctx: Context) -> str:
         return f"Error stopping playback: {str(e)}"
 
 @mcp.tool()
+def get_arrangement_clips(ctx: Context, track_index: int) -> str:
+    """
+    Get a list of clips on the arrangement timeline for a track.
+    
+    Parameters:
+    - track_index: The index of the track to get arrangement clips from
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_arrangement_clips", {"track_index": track_index})
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting arrangement clips: {str(e)}")
+        return f"Error getting arrangement clips: {str(e)}"
+
+@mcp.tool()
+def get_arrangement_clip_notes(ctx: Context, track_index: int, clip_index: int) -> str:
+    """
+    Get notes from an arrangement clip.
+    
+    Parameters:
+    - track_index: The index of the track containing the clip
+    - clip_index: The index of the arrangement clip
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_arrangement_clip_notes", {
+            "track_index": track_index,
+            "clip_index": clip_index
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting arrangement clip notes: {str(e)}")
+        return f"Error getting arrangement clip notes: {str(e)}"
+
+@mcp.tool()
+def create_arrangement_clip(
+    ctx: Context, 
+    track_index: int, 
+    start_time: float, 
+    length: float, 
+    name: str = "", 
+    notes: List[Dict[str, Union[int, float, bool]]] = None
+) -> str:
+    """
+    Create a new MIDI clip in the arrangement view.
+    
+    Parameters:
+    - track_index: The index of the track to create the clip in
+    - start_time: The time position (in beats) in the Arrangement where the clip should be placed
+    - length: The length of the clip in beats
+    - name: Optional name for the new clip
+    - notes: Optional list of note dictionaries to add to the clip
+    """
+    if notes is None:
+        notes = []
+        
+    try:
+        ableton = get_ableton_connection()
+        
+        # Step 1: Create an empty clip
+        result = ableton.send_command("create_arrangement_clip", {
+            "track_index": track_index,
+            "start_time": start_time,
+            "length": length,
+            "name": name,
+            "notes": []  # Empty notes to prevent Ableton from crashing
+        })
+        
+        # Step 2: If there are notes, find the clip and add them
+        if notes:
+            import time
+            time.sleep(0.1)  # Yield to give Ableton time to register the new clip
+            
+            # Get all arrangement clips to find the index of the newly created one
+            clips_result = ableton.send_command("get_arrangement_clips", {"track_index": track_index})
+            
+            target_clip_index = -1
+            for clip in clips_result.get("clips", []):
+                if abs(clip.get("start_time", -1) - start_time) < 0.01:
+                    target_clip_index = clip.get("index")
+                    break
+                    
+            if target_clip_index != -1:
+                ableton.send_command("set_arrangement_clip_notes", {
+                    "track_index": track_index,
+                    "clip_index": target_clip_index,
+                    "notes": notes
+                })
+            else:
+                return f"Created empty arrangement clip, but failed to find it to add notes."
+                
+        return f"Created arrangement clip at track {track_index}, time {start_time} with {len(notes)} notes"
+    except Exception as e:
+        logger.error(f"Error creating arrangement clip: {str(e)}")
+        return f"Error creating arrangement clip: {str(e)}"
+
+@mcp.tool()
+def set_arrangement_clip_notes(
+    ctx: Context, 
+    track_index: int, 
+    clip_index: int, 
+    notes: List[Dict[str, Union[int, float, bool]]]
+) -> str:
+    """
+    Replace notes in an arrangement clip.
+    
+    Parameters:
+    - track_index: The index of the track containing the clip
+    - clip_index: The index of the arrangement clip
+    - notes: List of note dictionaries to add to the clip
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_arrangement_clip_notes", {
+            "track_index": track_index,
+            "clip_index": clip_index,
+            "notes": notes
+        })
+        return f"Replaced notes in arrangement clip {clip_index} on track {track_index}"
+    except Exception as e:
+        logger.error(f"Error setting arrangement clip notes: {str(e)}")
+        return f"Error setting arrangement clip notes: {str(e)}"
+
+@mcp.tool()
 def get_browser_tree(ctx: Context, category_type: str = "all") -> str:
     """
     Get a hierarchical tree of browser categories from Ableton.

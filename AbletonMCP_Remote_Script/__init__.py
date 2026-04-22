@@ -7,6 +7,7 @@ import json
 import threading
 import time
 import traceback
+import Live
 
 # Change queue import for Python 2
 try:
@@ -225,11 +226,19 @@ class AbletonMCP(ControlSurface):
             elif command_type == "get_track_info":
                 track_index = params.get("track_index", 0)
                 response["result"] = self._get_track_info(track_index)
+            elif command_type == "get_arrangement_clips":
+                track_index = params.get("track_index", 0)
+                response["result"] = self._get_arrangement_clips(track_index)
+            elif command_type == "get_arrangement_clip_notes":
+                track_index = params.get("track_index", 0)
+                clip_index = params.get("clip_index", 0)
+                response["result"] = self._get_arrangement_clip_notes(track_index, clip_index)
             # Commands that modify Live's state should be scheduled on the main thread
             elif command_type in ["create_midi_track", "set_track_name", 
                                  "create_clip", "add_notes_to_clip", "set_clip_name", 
                                  "set_tempo", "fire_clip", "stop_clip",
-                                 "start_playback", "stop_playback", "load_browser_item"]:
+                                 "start_playback", "stop_playback", "load_browser_item",
+                                 "create_arrangement_clip", "set_arrangement_clip_notes"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -282,6 +291,18 @@ class AbletonMCP(ControlSurface):
                             track_index = params.get("track_index", 0)
                             item_uri = params.get("item_uri", "")
                             result = self._load_browser_item(track_index, item_uri)
+                        elif command_type == "create_arrangement_clip":
+                            track_index = params.get("track_index", 0)
+                            start_time = params.get("start_time", 0.0)
+                            length = params.get("length", 4.0)
+                            name = params.get("name", "")
+                            notes = params.get("notes", [])
+                            result = self._create_arrangement_clip(track_index, start_time, length, name, notes)
+                        elif command_type == "set_arrangement_clip_notes":
+                            track_index = params.get("track_index", 0)
+                            clip_index = params.get("clip_index", 0)
+                            notes = params.get("notes", [])
+                            result = self._set_arrangement_clip_notes(track_index, clip_index, notes)
                         
                         # Put the result in the queue
                         response_queue.put({"status": "success", "result": result})
@@ -503,15 +524,16 @@ class AbletonMCP(ControlSurface):
             live_notes = []
             for note in notes:
                 pitch = note.get("pitch", 60)
-                start_time = note.get("start_time", 0.0)
-                duration = note.get("duration", 0.25)
+                start_time = float(note.get("start_time", 0.0))
+                duration = float(note.get("duration", 0.25))
                 velocity = note.get("velocity", 100)
                 mute = note.get("mute", False)
                 
-                live_notes.append((pitch, start_time, duration, velocity, mute))
+                spec = Live.Clip.MidiNoteSpecification(start_time=start_time, duration=duration, pitch=pitch, velocity=velocity, mute=mute)
+                live_notes.append(spec)
             
             # Add the notes
-            clip.set_notes(tuple(live_notes))
+            clip.add_new_notes(tuple(live_notes))
             
             result = {
                 "note_count": len(notes)
@@ -548,6 +570,162 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error setting clip name: " + str(e))
             raise
     
+    def _create_arrangement_clip(self, track_index, start_time, length, name, notes):
+        """Create a new MIDI clip in the arrangement view"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+            track = self._song.tracks[track_index]
+            
+            # Find the last empty clip slot for staging
+            empty_slot_index = -1
+            for i in range(len(track.clip_slots) - 1, -1, -1):
+                if not track.clip_slots[i].has_clip:
+                    empty_slot_index = i
+                    break
+            
+            if empty_slot_index == -1:
+                raise Exception("No empty clip slots available in track to use as a staging area")
+            
+            clip_slot = track.clip_slots[empty_slot_index]
+            clip_slot.create_clip(length)
+            clip = clip_slot.clip
+            
+            if name:
+                clip.name = name
+                
+            # Add notes
+            if notes:
+                live_notes = []
+                for note in notes:
+                    pitch = note.get("pitch", 60)
+                    note_start = float(note.get("start_time", 0.0))
+                    duration = float(note.get("duration", 0.25))
+                    velocity = note.get("velocity", 100)
+                    mute = note.get("mute", False)
+                    spec = Live.Clip.MidiNoteSpecification(start_time=note_start, duration=duration, pitch=pitch, velocity=velocity, mute=mute)
+                    live_notes.append(spec)
+                clip.add_new_notes(tuple(live_notes))
+            
+            # Duplicate to arrangement
+            try:
+                self.log_message("Attempting to duplicate clip to arrangement at time " + str(start_time))
+                new_clip = track.duplicate_clip_to_arrangement(clip, start_time)
+            except Exception as e:
+                self.log_message("Error duplicating clip to arrangement: " + str(e))
+                self.log_message(traceback.format_exc())
+                raise Exception("Failed to copy to arrangement: " + str(e))
+            finally:
+                # Always cleanup the staging clip
+                try:
+                    clip_slot.delete_clip()
+                except Exception as e:
+                    self.log_message("Warning: Failed to delete staging clip: " + str(e))
+                    
+            return {"status": "success", "message": "Created arrangement clip"}
+        except Exception as e:
+            self.log_message("Error creating arrangement clip: " + str(e))
+            raise
+
+    def _get_arrangement_clips(self, track_index):
+        """Get a list of clips on the arrangement timeline for a track"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+            track = self._song.tracks[track_index]
+            
+            clips_info = []
+            for i, clip in enumerate(track.arrangement_clips):
+                clips_info.append({
+                    "index": i,
+                    "name": clip.name,
+                    "start_time": clip.start_time,
+                    "end_time": clip.end_time,
+                    "length": clip.length
+                })
+            
+            return {"clips": clips_info}
+        except Exception as e:
+            self.log_message("Error getting arrangement clips: " + str(e))
+            raise
+
+    def _get_arrangement_clip_notes(self, track_index, clip_index):
+        """Get notes from an arrangement clip"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+            track = self._song.tracks[track_index]
+            
+            if hasattr(track, 'arrangement_clips'):
+                arr_clips = track.arrangement_clips
+                if clip_index < 0 or clip_index >= len(arr_clips):
+                    raise IndexError("Arrangement clip index out of range")
+                    
+                clip = arr_clips[clip_index]
+                
+                # Get notes using extended API
+                notes_tuple = clip.get_notes_extended(0, 128, 0, clip.length)
+                
+                parsed_notes = []
+                for note in notes_tuple:
+                    parsed_notes.append({
+                        "note_id": getattr(note, 'note_id', -1),
+                        "pitch": note.pitch,
+                        "start_time": note.start_time,
+                        "duration": note.duration,
+                        "velocity": note.velocity,
+                        "mute": note.mute
+                    })
+                    
+                return {
+                    "name": clip.name,
+                    "start_time": clip.start_time,
+                    "length": clip.length,
+                    "notes": parsed_notes
+                }
+            else:
+                raise Exception("Track does not support arrangement_clips")
+        except Exception as e:
+            self.log_message("Error getting arrangement clip notes: " + str(e))
+            raise
+
+    def _set_arrangement_clip_notes(self, track_index, clip_index, notes):
+        """Replace notes in an arrangement clip"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+            track = self._song.tracks[track_index]
+            
+            if hasattr(track, 'arrangement_clips'):
+                arr_clips = track.arrangement_clips
+                if clip_index < 0 or clip_index >= len(arr_clips):
+                    raise IndexError("Arrangement clip index out of range")
+                    
+                clip = arr_clips[clip_index]
+                
+                # Clear existing notes
+                clip.remove_notes_extended(0, 128, 0, clip.length)
+                
+                # Add new notes
+                live_notes = []
+                for note in notes:
+                    pitch = note.get("pitch", 60)
+                    note_start = float(note.get("start_time", 0.0))
+                    duration = float(note.get("duration", 0.25))
+                    velocity = note.get("velocity", 100)
+                    mute = note.get("mute", False)
+                    spec = Live.Clip.MidiNoteSpecification(start_time=note_start, duration=duration, pitch=pitch, velocity=velocity, mute=mute)
+                    live_notes.append(spec)
+                    
+                clip.add_new_notes(tuple(live_notes))
+                
+                return {"status": "success", "note_count": len(notes)}
+            else:
+                raise Exception("Track does not support arrangement_clips")
+        except Exception as e:
+            self.log_message("Error setting arrangement clip notes: " + str(e))
+            raise
+
     def _set_tempo(self, tempo):
         """Set the tempo of the session"""
         try:
