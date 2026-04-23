@@ -210,8 +210,14 @@ class AbletonMCP(ControlSurface):
     
     def _process_command(self, command):
         """Process a command from the client and return a response"""
-        command_type = command.get("type", "")
-        params = command.get("params", {})
+        command_type = command.get("type", command.get("command", ""))
+        
+        # Merge top-level keys and "params" dictionary for robust parameter parsing
+        params = {}
+        for k, v in command.items():
+            if k not in ["type", "command", "params"]:
+                params[k] = v
+        params.update(command.get("params", {}))
         
         # Initialize response
         response = {
@@ -235,7 +241,7 @@ class AbletonMCP(ControlSurface):
                 response["result"] = self._get_arrangement_clip_notes(track_index, clip_index)
             # Commands that modify Live's state should be scheduled on the main thread
             elif command_type in ["create_midi_track", "set_track_name", 
-                                 "create_clip", "add_notes_to_clip", "set_clip_name", 
+                                 "create_clip", "delete_clip", "add_notes_to_clip", "set_clip_name", 
                                  "set_tempo", "fire_clip", "stop_clip",
                                  "start_playback", "stop_playback", "load_browser_item",
                                  "create_arrangement_clip", "set_arrangement_clip_notes"]:
@@ -258,6 +264,10 @@ class AbletonMCP(ControlSurface):
                             clip_index = params.get("clip_index", 0)
                             length = params.get("length", 4.0)
                             result = self._create_clip(track_index, clip_index, length)
+                        elif command_type == "delete_clip":
+                            track_index = params.get("track_index", 0)
+                            clip_index = params.get("clip_index", 0)
+                            result = self._delete_clip(track_index, clip_index)
                         elif command_type == "add_notes_to_clip":
                             track_index = params.get("track_index", 0)
                             clip_index = params.get("clip_index", 0)
@@ -486,9 +496,9 @@ class AbletonMCP(ControlSurface):
             
             clip_slot = track.clip_slots[clip_index]
             
-            # Check if the clip slot already has a clip
+            # Check if the clip slot already has a clip, delete it if so
             if clip_slot.has_clip:
-                raise Exception("Clip slot already has a clip")
+                clip_slot.delete_clip()
             
             # Create the clip
             clip_slot.create_clip(length)
@@ -500,6 +510,28 @@ class AbletonMCP(ControlSurface):
             return result
         except Exception as e:
             self.log_message("Error creating clip: " + str(e))
+            raise
+    
+    def _delete_clip(self, track_index, clip_index):
+        """Delete a MIDI clip from the specified track and clip slot"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+            
+            track = self._song.tracks[track_index]
+            
+            if clip_index < 0 or clip_index >= len(track.clip_slots):
+                raise IndexError("Clip index out of range")
+            
+            clip_slot = track.clip_slots[clip_index]
+            
+            if clip_slot.has_clip:
+                clip_slot.delete_clip()
+                return {"status": "deleted"}
+            else:
+                return {"status": "no_clip_to_delete"}
+        except Exception as e:
+            self.log_message("Error deleting clip: " + str(e))
             raise
     
     def _add_notes_to_clip(self, track_index, clip_index, notes):
