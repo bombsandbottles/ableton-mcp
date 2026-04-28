@@ -212,6 +212,9 @@ class AbletonMCP(ControlSurface):
         """Process a command from the client and return a response"""
         command_type = command.get("type", command.get("command", ""))
         
+        # Log command type for debugging
+        self.log_message("DEBUG: Processing command type: [%s]" % str(command_type))
+        
         # Merge top-level keys and "params" dictionary for robust parameter parsing
         params = {}
         for k, v in command.items():
@@ -244,7 +247,8 @@ class AbletonMCP(ControlSurface):
                                  "create_clip", "delete_clip", "add_notes_to_clip", "set_clip_name", 
                                  "set_tempo", "fire_clip", "stop_clip",
                                  "start_playback", "stop_playback", "load_browser_item",
-                                 "create_arrangement_clip", "set_arrangement_clip_notes"]:
+                                 "create_arrangement_clip", "set_arrangement_clip_notes",
+                                 "update_selected_clip_notes"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -313,6 +317,10 @@ class AbletonMCP(ControlSurface):
                             clip_index = params.get("clip_index", 0)
                             notes = params.get("notes", [])
                             result = self._set_arrangement_clip_notes(track_index, clip_index, notes)
+                        elif command_type == "update_selected_clip_notes":
+                            expected_clip_name = params.get("expected_clip_name", "")
+                            notes = params.get("notes", [])
+                            result = self._update_selected_clip_notes(expected_clip_name, notes)
                         
                         # Put the result in the queue
                         response_queue.put({"status": "success", "result": result})
@@ -357,9 +365,12 @@ class AbletonMCP(ControlSurface):
             elif command_type == "get_browser_items_at_path":
                 path = params.get("path", "")
                 response["result"] = self.get_browser_items_at_path(path)
+            elif command_type == "get_selected_clip":
+                include_notes = params.get("include_notes", False)
+                response["result"] = self._get_selected_clip(include_notes)
             else:
                 response["status"] = "error"
-                response["message"] = "Unknown command: " + command_type
+                response["message"] = "Unknown command: " + str(command_type)
         except Exception as e:
             self.log_message("Error processing command: " + str(e))
             self.log_message(traceback.format_exc())
@@ -367,6 +378,7 @@ class AbletonMCP(ControlSurface):
             response["message"] = str(e)
         
         return response
+
     
     # Command implementations
     
@@ -1008,6 +1020,101 @@ class AbletonMCP(ControlSurface):
         except Exception as e:
             self.log_message("Error finding browser item by URI: {0}".format(str(e)))
             return None
+
+    def _get_target_clip(self):
+        """Helper to get the currently selected clip and its track."""
+        try:
+            # Check detail clip first
+            clip = self._song.view.detail_clip
+            if not clip:
+                # Fallback to highlighted clip slot in Session view
+                highlighted_slot = self._song.view.highlighted_clip_slot
+                if highlighted_slot and highlighted_slot.has_clip:
+                    clip = highlighted_slot.clip
+            
+            track = self._song.view.selected_track
+            return clip, track
+        except Exception as e:
+            self.log_message("Error getting target clip: " + str(e))
+            return None, None
+
+    def _get_selected_clip(self, include_notes=False):
+        """Get details of the currently selected clip."""
+        try:
+            clip, track = self._get_target_clip()
+            
+            if not clip:
+                return {"status": "error", "message": "No clip is currently selected"}
+                
+            is_arrangement = getattr(clip, 'is_arrangement_clip', False)
+            view = "arrangement" if is_arrangement else "session"
+            
+            result = {
+                "name": clip.name,
+                "length": clip.length,
+                "is_audio_clip": clip.is_audio_clip,
+                "is_midi_clip": clip.is_midi_clip,
+                "view": view
+            }
+            
+            if include_notes and clip.is_midi_clip:
+                try:
+                    notes_tuple = clip.get_notes_extended(0, 128, 0, clip.length)
+                    parsed_notes = []
+                    for note in notes_tuple:
+                        parsed_notes.append({
+                            "pitch": note.pitch,
+                            "start_time": note.start_time,
+                            "duration": note.duration,
+                            "velocity": note.velocity,
+                            "mute": note.mute
+                        })
+                    result["notes"] = parsed_notes
+                except Exception as e:
+                    self.log_message("Warning: could not get notes for selected clip: " + str(e))
+            
+            return result
+        except Exception as e:
+            self.log_message("Error getting selected clip: " + str(e))
+            raise
+
+    def _update_selected_clip_notes(self, expected_clip_name, new_notes):
+        """Update notes of the currently selected clip directly."""
+        try:
+            clip, track = self._get_target_clip()
+            
+            if not clip:
+                return {"status": "error", "message": "No clip is currently selected"}
+                
+            if clip.is_audio_clip:
+                return {"status": "error", "message": "Cannot modify notes of an audio clip"}
+                
+            if track and track.is_frozen:
+                return {"status": "error", "message": "Cannot modify clip on a frozen track"}
+                
+            if expected_clip_name and clip.name != expected_clip_name:
+                if not (clip.name == "" and expected_clip_name == ""):
+                    return {"status": "error", "message": "Selected clip name does not match expected name"}
+                
+            # Clear existing notes and add new ones
+            clip.remove_notes_extended(0, 128, 0, clip.length)
+            
+            live_notes = []
+            for note in new_notes:
+                pitch = note.get("pitch", 60)
+                note_start = float(note.get("start_time", 0.0))
+                duration = float(note.get("duration", 0.25))
+                velocity = note.get("velocity", 100)
+                mute = note.get("mute", False)
+                spec = Live.Clip.MidiNoteSpecification(start_time=note_start, duration=duration, pitch=pitch, velocity=velocity, mute=mute)
+                live_notes.append(spec)
+                
+            clip.add_new_notes(tuple(live_notes))
+            
+            return {"status": "success", "note_count": len(new_notes)}
+        except Exception as e:
+            self.log_message("Error updating selected clip notes: " + str(e))
+            raise
     
     # Helper methods
     
