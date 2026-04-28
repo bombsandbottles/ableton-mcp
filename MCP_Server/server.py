@@ -105,7 +105,8 @@ class AbletonConnection:
             "create_midi_track", "create_audio_track", "set_track_name",
             "create_clip", "add_notes_to_clip", "set_clip_name",
             "set_tempo", "fire_clip", "stop_clip", "set_device_parameter",
-            "start_playback", "stop_playback", "load_instrument_or_effect"
+            "start_playback", "stop_playback", "load_instrument_or_effect",
+            "update_selected_clip_notes"
         ]
         
         try:
@@ -798,6 +799,52 @@ def load_drum_kit(ctx: Context, track_index: int, rack_uri: str, kit_path: str) 
     except Exception as e:
         logger.error(f"Error loading drum kit: {str(e)}")
         return f"Error loading drum kit: {str(e)}"
+
+@mcp.tool()
+def get_selected_clip(ctx: Context, include_notes: bool = False) -> str:
+    """
+    Get the details of the currently selected clip in Ableton Live.
+    
+    Parameters:
+    - include_notes: Whether to include the notes of the clip in the response
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_selected_clip", {
+            "include_notes": include_notes
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting selected clip: {str(e)}")
+        return f"Error getting selected clip: {str(e)}"
+
+@mcp.tool()
+def update_selected_clip_notes(
+    ctx: Context, 
+    expected_clip_name: str, 
+    notes: List[Dict[str, Union[int, float, bool]]]
+) -> str:
+    """
+    Update the notes of the currently selected clip in Ableton Live.
+    
+    Parameters:
+    - expected_clip_name: The name of the clip to verify before making changes
+    - notes: List of note dictionaries to add to the clip
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("update_selected_clip_notes", {
+            "expected_clip_name": expected_clip_name,
+            "notes": notes
+        })
+        
+        if isinstance(result, dict) and result.get("status") == "error":
+            return f"Error updating clip: {result.get('message')}"
+            
+        return f"Successfully updated notes in selected clip '{expected_clip_name}'"
+    except Exception as e:
+        logger.error(f"Error updating selected clip notes: {str(e)}")
+        return f"Error updating selected clip notes: {str(e)}"
 
 # Main execution
 def main():
